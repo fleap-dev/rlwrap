@@ -54,6 +54,9 @@ pub struct Rlwrap {
     /// The current buffer being edited.
     pub buffer: String,
 
+    /// Cursor position in the buffer
+    pub cursor: u16,
+
     /// Terminal size (rows, cols).
     pub terminal_size: (u16, u16),
 }
@@ -96,6 +99,7 @@ impl Rlwrap {
             config,
             out_thread: None,
             buffer: String::new(),
+            cursor: 0,
             terminal_size: termion::terminal_size()?,
         }));
 
@@ -125,13 +129,15 @@ impl Rlwrap {
     }
     pub fn redraw(&mut self) {
         if let Some(out) = &mut self.original_output_file {
+            let cursor_x = (self.config.prefix.len() as u16) + self.cursor + 1;
             write!(
                 out,
-                "{}{}\r{}{}",
+                "{}{}\r{}{}{}",
                 termion::cursor::Goto(0, self.terminal_size.1),
                 termion::clear::CurrentLine,
                 &self.config.prefix,
                 &self.buffer,
+                termion::cursor::Goto(cursor_x, self.terminal_size.1),
             )
             .ok();
         }
@@ -196,24 +202,27 @@ fn readline_thread(rlwrap: Weak<Mutex<Rlwrap>>, from: i32, to: i32) -> JoinHandl
                     if let Ok(event) = event {
                         if let Event::Key(k) = event {
                             let mut guard = rlwrap.lock().unwrap();
-                            let buffer = &mut guard.buffer;
                             match k {
                                 Key::Char(c) => {
-                                    buffer.push(c);
+                                    let cpos = guard.cursor as usize;
+                                    guard.buffer.insert(cpos, c);
+                                    guard.cursor += 1;
                                     if c == '\n' {
-                                        if to.write_all(buffer.as_bytes()).is_err() {
+                                        if to.write_all(guard.buffer.as_bytes()).is_err() {
                                             break;
                                         }
-                                        buffer.clear();
+                                        guard.buffer.clear();
+                                        guard.cursor = 0;
                                     }
                                 }
                                 Key::Ctrl(c) => {
                                     if c == 'd' {
-                                        buffer.push(4u8 as char);
-                                        if to.write_all(buffer.as_bytes()).is_err() {
+                                        guard.buffer.push(4u8 as char);
+                                        if to.write_all(guard.buffer.as_bytes()).is_err() {
                                             break;
                                         }
-                                        buffer.clear();
+                                        guard.buffer.clear();
+                                        guard.cursor = 0;
                                     }
                                     if c == 'c' {
                                         if guard.config.stop_on_ctrl_c {
@@ -225,7 +234,22 @@ fn readline_thread(rlwrap: Weak<Mutex<Rlwrap>>, from: i32, to: i32) -> JoinHandl
                                     }
                                 }
                                 Key::Backspace => {
-                                    buffer.pop();
+                                    let cur = guard.cursor as usize;
+                                    let blen = guard.buffer.len();
+                                    if blen > 0 && cur <= blen {
+                                        guard.buffer.remove(cur as usize - 1);
+                                        guard.cursor -= 1;
+                                    }
+                                },
+                                Key::Left => {
+                                    if guard.cursor > 0 {
+                                        guard.cursor -= 1;
+                                    }
+                                },
+                                Key::Right => {
+                                    if (guard.cursor as usize) < guard.buffer.len() {
+                                        guard.cursor += 1;
+                                    }
                                 }
                                 _ => {}
                             }
